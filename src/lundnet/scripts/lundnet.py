@@ -9,6 +9,7 @@ from __future__ import print_function
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import math
 
 import tqdm
 from functools import partial
@@ -34,6 +35,20 @@ def accuracy(preds, labels):
     if labels.ndim == 2:
         labels = labels[:, 1]
     return (preds.argmax(1) == labels).sum().item() / len(labels)
+
+def epoch_auc_from_scores(labels, scores):
+    """Compute AUC from binary labels and signal scores."""
+    labels = np.asarray(labels)
+    scores = np.asarray(scores)
+
+    # evita crash se per qualche motivo c'è una sola classe
+    if len(np.unique(labels)) < 2:
+        return float('nan')
+
+    fpr, tpr, _ = roc_curve(labels, scores, pos_label=1)
+    eff_s = tpr
+    eff_b = 1 - fpr
+    return ROC_area(eff_s, eff_b)
 
 
 def main():
@@ -72,7 +87,7 @@ def main():
         elif args.model == 'lundnet3':
             LundCoordinates.change_dimension(3, ['lnz', 'lnDelta', 'lnKt'])
         elif args.model == 'lundnet2':
-            LundCoordinates.change_dimension(2, ['lnDelta', 'lnKt'])
+            LundCoordinates.change_dimension(2, ['lnz', 'lnDelta'])
         kt_min = np.exp(args.ln_kt_min) if (args.ln_kt_min is not None and args.ln_kt_min > -99) else 0
         delta_min = np.exp(args.ln_delta_min) if args.ln_delta_min is not None else 0
         JetTree.change_cuts(kt_min, delta_min)
@@ -157,85 +172,129 @@ def main():
                 use_fusion=use_fusion)
     model = model.to(dev)
 
-    def train(model, opt, scheduler, train_loader, dev):
+    def train(model, opt, scheduler, train_loader, dev, loss_func):
         model.train()
-
-        total_loss = 0
+        total_loss = 0.0
         num_batches = 0
         total_correct = 0
         count = 0
         tic = time.time()
+    
+        all_scores = []
+        all_labels = []
+    
         with tqdm.tqdm(train_loader, ascii=True) as tq:
             for batch in tq:
                 label = batch.label
                 num_examples = label.shape[0]
                 label = label.to(dev).squeeze().long()
+    
                 opt.zero_grad()
                 logits = model(batch.batch_graph.to(dev), batch.features.to(dev))
                 loss = loss_func(logits, label)
                 loss.backward()
                 opt.step()
-
+    
+                probs = torch.softmax(logits, dim=1)[:, 1]
                 _, preds = logits.max(1)
-
+    
                 num_batches += 1
                 count += num_examples
-                loss = loss.item()
+                loss_value = loss.item()
                 correct = (preds == label).sum().item()
-                total_loss += loss
+    
+                total_loss += loss_value
                 total_correct += correct
-
+    
+                all_scores.append(probs.detach().cpu().numpy())
+                all_labels.append(label.detach().cpu().numpy())
+    
                 tq.set_postfix({
-                    'Loss': '%.5f' % loss,
+                    'Loss': '%.5f' % loss_value,
                     'AvgLoss': '%.5f' % (total_loss / num_batches),
                     'Acc': '%.5f' % (correct / num_examples),
-                    'AvgAcc': '%.5f' % (total_correct / count)})
+                    'AvgAcc': '%.5f' % (total_correct / count),
+                })
+    
         scheduler.step()
-
+    
         ts = time.time() - tic
+        avg_loss = total_loss / max(num_batches, 1)
+        avg_acc = total_correct / max(count, 1)
+    
+        all_scores = np.concatenate(all_scores)
+        all_labels = np.concatenate(all_labels)
+        avg_auc = epoch_auc_from_scores(all_labels, all_scores)
+    
         print('Trained over {count} samples in {ts} secs (avg. speed {speed} samples/s.)'.format(
             count=count, ts=ts, speed=count / ts
         ))
+    
+        return avg_loss, avg_acc, avg_auc
 
-    def evaluate(model, test_loader, dev, return_scores=False, return_time=False):
+    def evaluate(model, test_loader, dev, loss_func=None,
+             return_scores=False, return_time=False, return_metrics=False):
         model.eval()
-
         total_correct = 0
+        total_loss = 0.0
+        num_batches = 0
         count = 0
         scores = []
+        labels_all = []
         tic = time.time()
-
+    
         with torch.no_grad():
             with tqdm.tqdm(test_loader, ascii=True) as tq:
                 for batch in tq:
                     label = batch.label
                     num_examples = label.shape[0]
                     label = label.to(dev).squeeze().long()
+    
                     logits = model(batch.batch_graph.to(dev), batch.features.to(dev))
+                    probs = torch.softmax(logits, dim=1)
+    
+                    if loss_func is not None:
+                        loss = loss_func(logits, label)
+                        total_loss += loss.item()
+                        num_batches += 1
+    
                     _, preds = logits.max(1)
-
-                    if return_scores:
-                        scores.append(torch.softmax(logits, dim=1).cpu().detach().numpy())
-
+    
+                    scores.append(probs.cpu().detach().numpy())
+                    labels_all.append(label.cpu().detach().numpy())
+    
                     correct = (preds == label).sum().item()
                     total_correct += correct
                     count += num_examples
-
-                    tq.set_postfix({
+    
+                    postfix = {
                         'Acc': '%.5f' % (correct / num_examples),
-                        'AvgAcc': '%.5f' % (total_correct / count)})
-
+                        'AvgAcc': '%.5f' % (total_correct / count),
+                    }
+                    if loss_func is not None and num_batches > 0:
+                        postfix['AvgLoss'] = '%.5f' % (total_loss / num_batches)
+    
+                    tq.set_postfix(postfix)
+    
         ts = time.time() - tic
         print('Tested over {count} samples in {ts} secs (avg. speed {speed} samples/s.)'.format(
             count=count, ts=ts, speed=count / ts
         ))
+    
+        avg_acc = total_correct / max(count, 1)
+        avg_loss = (total_loss / max(num_batches, 1)) if loss_func is not None else None
+    
+        scores = np.concatenate(scores)
+        labels_all = np.concatenate(labels_all)
+        avg_auc = epoch_auc_from_scores(labels_all, scores[:, 1])
+    
         if return_time:
             return ts
-
         if return_scores:
-            return np.concatenate(scores)
-        else:
-            return total_correct / count
+            return scores
+        if return_metrics:
+            return avg_loss, avg_acc, avg_auc
+        return avg_acc
 
     if training_mode:
         # loss function
@@ -249,19 +308,69 @@ def main():
         scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=lr_steps, gamma=0.1)
 
         # training loop
-        best_valid_acc = 0
-        for epoch in range(args.num_epochs):
-            train(model, opt, scheduler, train_loader, dev)
+        best_valid_acc = 0.0
+        history = {
+            'epoch': [],
+            'train_loss': [],
+            'train_acc': [],
+            'train_auc': [],
+            'val_loss': [],
+            'val_acc': [],
+            'val_auc': [],
+        }
+        if args.save and not os.path.exists(args.save):
+            os.makedirs(args.save)
 
+        start_time = time.time()
+        for epoch in range(args.num_epochs):
+            print('Epoch #%d Training' % epoch)
+            train_loss, train_acc, train_auc = train(model, opt, scheduler, train_loader, dev, loss_func)
+        
             print('Epoch #%d Validating' % epoch)
-            valid_acc = evaluate(model, val_loader, dev)
+            valid_loss, valid_acc, valid_auc = evaluate(
+                model, val_loader, dev,
+                loss_func=loss_func,
+                return_metrics=True
+            )
+        
+            history['epoch'].append(epoch + 1)
+            history['train_loss'].append(train_loss)
+            history['train_acc'].append(train_acc)
+            history['train_auc'].append(train_auc)
+            history['val_loss'].append(valid_loss)
+            history['val_acc'].append(valid_acc)
+            history['val_auc'].append(valid_auc)
+        
+            print(
+                'Epoch %d summary | train_loss=%.5f train_acc=%.5f train_auc=%.5f | val_loss=%.5f val_acc=%.5f val_auc=%.5f'
+                % (epoch + 1, train_loss, train_acc, train_auc, valid_loss, valid_acc, valid_auc)
+            )        
             if valid_acc > best_valid_acc:
                 best_valid_acc = valid_acc
                 if args.save:
-                    if args.save and not os.path.exists(args.save):
-                        os.makedirs(args.save)
                     torch.save(model.state_dict(), os.path.join(args.save, '%s_state.pt' % args.name))
+        
+            if args.save:
+                # salvataggio history in pickle
+                with open(os.path.join(args.save, '%s_history.pickle' % args.name), 'wb') as f:
+                    pickle.dump(history, f)
+        
+                # salvataggio history in csv leggibile
+            with open(os.path.join(args.save, '%s_history.csv' % args.name), 'w') as f:
+                f.write('epoch,train_loss,train_acc,train_auc,val_loss,val_acc,val_auc\n')
+                for e, tl, ta, tua, vl, va, vua in zip(
+                    history['epoch'],
+                    history['train_loss'],
+                    history['train_acc'],
+                    history['train_auc'],
+                    history['val_loss'],
+                    history['val_acc'],
+                    history['val_auc'],
+                ):
+                    f.write(f'{e},{tl},{ta},{tua},{vl},{va},{vua}\n')
+
             print('Current validation acc: %.5f (best: %.5f)' % (valid_acc, best_valid_acc))
+        end_time = time.time()  
 
     # evaluate model on test dataset
     path = args.save if training_mode else os.path.dirname(args.load)
@@ -299,7 +408,32 @@ def main():
                  'test_bkg': args.test_bkg}
     if training_mode:
         info_dict.update({'train_sig': args.train_sig,
-                          'train_bkg': args.train_bkg})
+                          'train_bkg': args.train_bkg,
+                          'training_time': str(end_time - start_time) + " seconds"})
+
+    base_name = name.split('.')[0]
+
+    test_pred_labels = np.argmax(test_preds, axis=1)
+    
+    with open(os.path.join(path, base_name + '_predictions.pickle'), 'wb') as f:
+        pickle.dump({
+            'true_labels': test_labels,
+            'pred_labels': test_pred_labels,
+            'pred_probs': test_preds,
+            'prob_bkg': test_preds[:, 0],
+            'prob_sig': test_preds[:, 1],
+        }, f)
+    
+    with open(os.path.join(path, base_name + '_predictions.csv'), 'w') as f:
+        f.write('index,true_label,pred_label,prob_bkg,prob_sig\n')
+        for i in range(len(test_labels)):
+            f.write('{},{},{},{},{}\n'.format(
+                i,
+                int(test_labels[i]),
+                int(test_pred_labels[i]),
+                float(test_preds[i, 0]),
+                float(test_preds[i, 1])
+            ))
 
     fpr, tpr, threshs = roc_curve(test_labels, test_preds[:, 1], pos_label=1)
     # convert into signal and background efficiency
@@ -315,13 +449,12 @@ def main():
     print(' === Summary ===')
     for k in info_dict:
         print('%s: %s' % (k, info_dict[k]))
-
+    
     info_file = os.path.join(path, args.name if training_mode else name) + '_INFO.txt'
     with open(info_file, 'w') as f:
         for k in info_dict:
             f.write('%s: %s\n' % (k, info_dict[k]))
 
-    base_name = name.split('.')[0]
     filename = os.path.join(path, base_name)
     with open(filename + '_ROC_data.pickle', 'wb') as f:
         pickle.dump({'signal_eff': eff_s,

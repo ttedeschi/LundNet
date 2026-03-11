@@ -37,8 +37,12 @@ class DGLGraphDatasetLund(Dataset):
         # attempt at using less memory
         self.data = []
         self.label = []
+        i = 0
         for jet in reader_bkg:
             self.data += [self._build_tree(JetTree(jet))]
+            if i<20:
+                print("[DEBUG] number of graph nodes =", self.data[-1].number_of_nodes())
+            i += 1
             self.label += [0]
         for jet in reader_sig:
             self.data += [self._build_tree(JetTree(jet))]
@@ -51,43 +55,54 @@ class DGLGraphDatasetLund(Dataset):
             df.to_csv('num_nodes_lund_net_ktmin_%s_deltamin_%s.csv' % (JetTree.ktmin, JetTree.deltamin))
         self.label = torch.tensor(self.label, dtype=torch.float32)
 
-    def _build_tree(self, root):
+    def _build_tree(self, root, max_depth=1000000):
         g = nx.Graph()
         jet_p4 = TLorentzVector(*root.node)
-
-        def _rec_build(nid, node):
+    
+        def _rec_build(nid, node, depth):
+            if depth >= max_depth:
+                return
+    
             branches = [node.harder, node.softer] if DGLGraphDatasetLund.fill_secondary else [node.harder]
+    
             for branch in branches:
                 if branch is None or branch.lundCoord is None:
-                    # stop when reaching the leaf nodes
-                    # we do not add the leaf nodes to the graph/tree as they do not have Lund coordinates
+                    # leaf: non aggiungere
                     continue
+    
                 cid = g.number_of_nodes()
+    
                 if DGLGraphDatasetLund.node_coordinates == 'lund':
                     spatialCoord = branch.lundCoord.state()[:2]
                 else:
                     node_p4 = TLorentzVector(*branch.node)
                     spatialCoord = np.array(
-                        [delta_eta_reflect(node_p4, jet_p4),
-                         node_p4.delta_phi(jet_p4)],
-                        dtype='float32')
+                        [delta_eta_reflect(node_p4, jet_p4), node_p4.delta_phi(jet_p4)],
+                        dtype='float32'
+                    )
+    
                 g.add_node(cid, coordinates=spatialCoord, features=branch.lundCoord.state())
                 g.add_edge(cid, nid)
-                _rec_build(cid, branch)
-        # add root
+    
+                _rec_build(cid, branch, depth + 1)
+    
+        # aggiungi root
         if root.lundCoord is not None:
             if DGLGraphDatasetLund.node_coordinates == 'lund':
                 spatialCoord = root.lundCoord.state()[:2]
             else:
                 spatialCoord = np.zeros(2, dtype='float32')
+    
             g.add_node(0, coordinates=spatialCoord, features=root.lundCoord.state())
-            _rec_build(0, root)
+            _rec_build(0, root, 1)
         else:
-            # when a jet has only one particle (?)
-            g.add_node(0, coordinates=np.zeros(2, dtype='float32'),
-                       features=np.zeros(LundCoordinates.dimension, dtype='float32'))
+            g.add_node(
+                0,
+                coordinates=np.zeros(2, dtype='float32'),
+                features=np.zeros(LundCoordinates.dimension, dtype='float32')
+            )
+    
         ret = dgl.from_networkx(g, node_attrs=['coordinates', 'features'])
-        # print(ret.number_of_nodes())
         return ret
 
     @property
