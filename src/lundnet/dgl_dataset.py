@@ -55,7 +55,7 @@ class DGLGraphDatasetLund(Dataset):
             df.to_csv('num_nodes_lund_net_ktmin_%s_deltamin_%s.csv' % (JetTree.ktmin, JetTree.deltamin))
         self.label = torch.tensor(self.label, dtype=torch.float32)
 
-    def _build_tree(self, root, max_depth=1000000):
+    def _build_tree(self, root, max_depth=3):
         g = nx.Graph()
         jet_p4 = TLorentzVector(*root.node)
     
