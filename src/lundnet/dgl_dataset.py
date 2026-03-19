@@ -28,8 +28,9 @@ class DGLGraphDatasetLund(Dataset):
     fill_secondary = True
     node_coordinates = 'eta-phi'  # 'lund'
 
-    def __init__(self, filepath_bkg, filepath_sig, nev=-1):
+    def __init__(self, filepath_bkg, filepath_sig, nev=-1, max_depth=3):
         super(DGLGraphDatasetLund, self).__init__()
+        self.max_depth = max_depth
         print('Start loading dataset %s (bkg) and %s (sig)' % (filepath_bkg, filepath_sig))
         tic = time.process_time()
         reader_bkg = Jets(filepath_bkg, nev, groomer=groomer)
@@ -39,13 +40,13 @@ class DGLGraphDatasetLund(Dataset):
         self.label = []
         i = 0
         for jet in reader_bkg:
-            self.data += [self._build_tree(JetTree(jet))]
-            if i<20:
+            self.data += [self._build_tree(JetTree(jet), max_depth=self.max_depth)]
+            if i < 20:
                 print("[DEBUG] number of graph nodes =", self.data[-1].number_of_nodes())
             i += 1
             self.label += [0]
         for jet in reader_sig:
-            self.data += [self._build_tree(JetTree(jet))]
+            self.data += [self._build_tree(JetTree(jet), max_depth=self.max_depth)]
             self.label += [1]
         print(' ... Total time to read input files + construct the graphs for {num} jets: {ts} seconds'.format(
             num=len(self.label), ts=time.process_time() - tic))
@@ -55,23 +56,22 @@ class DGLGraphDatasetLund(Dataset):
             df.to_csv('num_nodes_lund_net_ktmin_%s_deltamin_%s.csv' % (JetTree.ktmin, JetTree.deltamin))
         self.label = torch.tensor(self.label, dtype=torch.float32)
 
-    def _build_tree(self, root, max_depth=3):
+    def _build_tree(self, root, max_depth=1000000):
         g = nx.Graph()
         jet_p4 = TLorentzVector(*root.node)
-    
+
         def _rec_build(nid, node, depth):
             if depth >= max_depth:
                 return
-    
+
             branches = [node.harder, node.softer] if DGLGraphDatasetLund.fill_secondary else [node.harder]
-    
+
             for branch in branches:
                 if branch is None or branch.lundCoord is None:
-                    # leaf: non aggiungere
                     continue
-    
+
                 cid = g.number_of_nodes()
-    
+
                 if DGLGraphDatasetLund.node_coordinates == 'lund':
                     spatialCoord = branch.lundCoord.state()[:2]
                 else:
@@ -80,19 +80,18 @@ class DGLGraphDatasetLund(Dataset):
                         [delta_eta_reflect(node_p4, jet_p4), node_p4.delta_phi(jet_p4)],
                         dtype='float32'
                     )
-    
+
                 g.add_node(cid, coordinates=spatialCoord, features=branch.lundCoord.state())
                 g.add_edge(cid, nid)
-    
+
                 _rec_build(cid, branch, depth + 1)
-    
-        # aggiungi root
+
         if root.lundCoord is not None:
             if DGLGraphDatasetLund.node_coordinates == 'lund':
                 spatialCoord = root.lundCoord.state()[:2]
             else:
                 spatialCoord = np.zeros(2, dtype='float32')
-    
+
             g.add_node(0, coordinates=spatialCoord, features=root.lundCoord.state())
             _rec_build(0, root, 1)
         else:
@@ -101,7 +100,7 @@ class DGLGraphDatasetLund(Dataset):
                 coordinates=np.zeros(2, dtype='float32'),
                 features=np.zeros(LundCoordinates.dimension, dtype='float32')
             )
-    
+
         ret = dgl.from_networkx(g, node_attrs=['coordinates', 'features'])
         return ret
 

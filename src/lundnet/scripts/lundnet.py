@@ -90,6 +90,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--batch-size', type=int, default=-1)
     parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--max-depth', type=int, default=1000000)
 
     # nuovi argomenti per CV
     parser.add_argument('--cv-folds', type=int, default=0)
@@ -133,6 +134,7 @@ def main():
 
     # data format
     DGLGraphDataset = DGLGraphDatasetLund if 'lund' in args.model else DGLGraphDatasetParticle
+    dataset_kwargs = {'max_depth': args.max_depth} if 'lund' in args.model else {}
 
     # model parameter
     if args.model == 'particlenet':
@@ -176,15 +178,15 @@ def main():
     # load data (only in standard mode)
     if not cv_mode:
         if training_mode:
-            train_data = DGLGraphDataset(args.train_bkg, args.train_sig, nev=args.nev)
-            val_data = DGLGraphDataset(args.val_bkg, args.val_sig, nev=args.nev_val)
+            train_data = DGLGraphDataset(args.train_bkg, args.train_sig, nev=args.nev, **dataset_kwargs)
+            val_data = DGLGraphDataset(args.val_bkg, args.val_sig, nev=args.nev_val, **dataset_kwargs)
             train_loader = DataLoader(train_data, num_workers=args.num_workers, batch_size=args.batch_size,
                                       collate_fn=collate_fn, shuffle=True, drop_last=True, pin_memory=True)
             val_loader = DataLoader(val_data, num_workers=args.num_workers, batch_size=args.batch_size,
                                     collate_fn=collate_fn, shuffle=False, drop_last=True, pin_memory=True)
             input_dims = train_data.num_features
         else:
-            test_data = DGLGraphDataset(args.test_bkg, args.test_sig, nev=args.nev_test)
+            test_data = DGLGraphDataset(args.test_bkg, args.test_sig, nev=args.nev_test, **dataset_kwargs)
             test_loader = DataLoader(test_data, num_workers=args.num_workers, batch_size=args.batch_size,
                                      collate_fn=collate_fn, shuffle=False, drop_last=False, pin_memory=True)
             input_dims = test_data.num_features
@@ -341,9 +343,9 @@ def main():
         if args.save and not os.path.exists(args.save):
             os.makedirs(args.save)
 
-        data_train_all = DGLGraphDataset(args.train_bkg, args.train_sig, nev=args.nev)
-        data_val_all = DGLGraphDataset(args.val_bkg, args.val_sig, nev=args.nev_val)
-        data_test_all = DGLGraphDataset(args.test_bkg, args.test_sig, nev=args.nev_test)
+        data_train_all = DGLGraphDataset(args.train_bkg, args.train_sig, nev=args.nev, **dataset_kwargs)
+        data_val_all = DGLGraphDataset(args.val_bkg, args.val_sig, nev=args.nev_val, **dataset_kwargs)
+        data_test_all = DGLGraphDataset(args.test_bkg, args.test_sig, nev=args.nev_test, **dataset_kwargs)
 
         merged_data = ConcatDataset([data_train_all, data_val_all, data_test_all])
         merged_labels = np.concatenate([
@@ -652,7 +654,7 @@ def main():
 
     if training_mode:
         del train_data, train_loader, val_data, val_loader
-        test_data = DGLGraphDataset(args.test_bkg, args.test_sig, args.nev_test)
+        test_data = DGLGraphDataset(args.test_bkg, args.test_sig, nev=args.nev_test, **dataset_kwargs)
         test_loader = DataLoader(test_data, num_workers=args.num_workers, batch_size=args.batch_size,
                                  collate_fn=collate_fn, shuffle=False, drop_last=False, pin_memory=True)
 
@@ -675,6 +677,7 @@ def main():
                  'model_params': {'conv_params': conv_params, 'fc_params': fc_params},
                  'lund_ln_kt_min': args.ln_kt_min,
                  'lund_ln_delta_min': args.ln_delta_min,
+                 'max_depth': args.max_depth if 'lund' in args.model else 'N/A',
                  'date': str(datetime.date.today()),
                  'model_path': args.save if training_mode else args.load,
                  'model_name': args.name,
