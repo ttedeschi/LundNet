@@ -436,6 +436,7 @@ def main():
             scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=lr_steps, gamma=0.1)
 
             best_valid_acc = -1.0
+            best_epoch = 0
             best_state_dict = copy.deepcopy(model.state_dict())
 
             history = {
@@ -474,6 +475,7 @@ def main():
 
                 if valid_acc > best_valid_acc:
                     best_valid_acc = valid_acc
+                    best_epoch = epoch
                     best_state_dict = copy.deepcopy(model.state_dict())
                     if args.save:
                         torch.save(model.state_dict(), os.path.join(args.save, '%s_fold%d_state.pt' % (args.name, fold_idx)))
@@ -495,7 +497,7 @@ def main():
                         ):
                             f.write(f'{e},{tl},{ta},{tua},{vl},{va},{vua}\n')
 
-                print('Current validation acc: %.5f (best: %.5f)' % (valid_acc, best_valid_acc))
+                print('Current validation acc: %.5f (best: %.5f, epoch %d)' % (valid_acc, best_valid_acc, best_epoch))
 
             model.load_state_dict(best_state_dict)
 
@@ -576,6 +578,7 @@ def main():
 
         # training loop
         best_valid_acc = -1.0
+        best_epoch = 0
         best_state_dict = copy.deepcopy(model.state_dict())
 
         history = {
@@ -616,6 +619,7 @@ def main():
             )
             if valid_acc > best_valid_acc:
                 best_valid_acc = valid_acc
+                best_epoch = epoch
                 best_state_dict = copy.deepcopy(model.state_dict())
                 if args.save:
                     torch.save(model.state_dict(), os.path.join(args.save, '%s_state.pt' % args.name))
@@ -639,7 +643,7 @@ def main():
                     ):
                         f.write(f'{e},{tl},{ta},{tua},{vl},{va},{vua}\n')
 
-            print('Current validation acc: %.5f (best: %.5f)' % (valid_acc, best_valid_acc))
+            print('Current validation acc: %.5f (best: %.5f, epoch %d)' % (valid_acc, best_valid_acc, best_epoch))
         end_time = time.time()
 
     # =========================
@@ -686,7 +690,8 @@ def main():
     if training_mode:
         info_dict.update({'train_sig': args.train_sig,
                           'train_bkg': args.train_bkg,
-                          'training_time': str(end_time - start_time) + " seconds"})
+                          'training_time': str(end_time - start_time) + " seconds"}
+                        )
 
     base_name = name.split('.')[0]
 
@@ -718,6 +723,8 @@ def main():
     eff_b = 1 - fpr
     auc = ROC_area(eff_s, eff_b)
 
+    info_dict['best_epoch'] = best_epoch
+    info_dict['best_valid_acc'] = best_valid_acc
     info_dict['accuracy'] = accuracy(test_preds, test_labels)
     info_dict['auc'] = auc
     info_dict['inv_bkg_at_sig_50'] = bkg_rejection_at_threshold(eff_s, eff_b, 0.5)
