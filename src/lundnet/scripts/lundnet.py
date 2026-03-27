@@ -690,7 +690,9 @@ def main():
     if training_mode:
         info_dict.update({'train_sig': args.train_sig,
                           'train_bkg': args.train_bkg,
-                          'training_time': str(end_time - start_time) + " seconds"}
+                          'training_time': str(end_time - start_time) + " seconds",
+                          'best_epoch': best_epoch,
+                          'best_valid_acc': best_valid_acc},
                         )
 
     base_name = name.split('.')[0]
@@ -723,8 +725,6 @@ def main():
     eff_b = 1 - fpr
     auc = ROC_area(eff_s, eff_b)
 
-    info_dict['best_epoch'] = best_epoch
-    info_dict['best_valid_acc'] = best_valid_acc
     info_dict['accuracy'] = accuracy(test_preds, test_labels)
     info_dict['auc'] = auc
     info_dict['inv_bkg_at_sig_50'] = bkg_rejection_at_threshold(eff_s, eff_b, 0.5)
